@@ -13587,6 +13587,12 @@
       "autoAdvanceHint": "Turning past the last page opens the next book in the series.",
       "autoAdvancePagedOnly": "Auto-advance applies in paged mode only.",
       "pageView": "Page view",
+      "pageTurn": {
+        "label": "Page turn",
+        "cover": "Cover",
+        "slide": "Slide",
+        "hint": "Cover slides the page away with a soft edge shadow. Slide moves both pages together."
+      },
       "twoPagePagedOnly": "Two pages are shown only in paged mode.",
       "spreadSection": "Two-page spread",
       "spreadFallbackHint": "This screen is too narrow for two pages, so single pages are shown.",

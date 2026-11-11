@@ -127,6 +127,9 @@ export interface CbxReaderSettings {
   viewMode: "single" | "two-page";
   scrollMode: "paginated" | "infinite" | "long-strip";
   direction: "ltr" | "rtl";
+  // Animated page turn used while dragging: cover slides the current page away with a page-edge
+  // shadow; slide moves the outgoing and incoming pages together like a film strip.
+  pageTurnMode: "cover" | "slide";
   spreadAlignment: "normal" | "shifted";
   spreadGap: number;
   forceTwoPage: boolean;
@@ -193,6 +196,7 @@ export const CBX_READER_DEFAULTS: CbxReaderSettings = {
   viewMode: "single",
   scrollMode: "paginated",
   direction: "ltr",
+  pageTurnMode: "cover",
   spreadAlignment: "normal",
   spreadGap: 0,
   forceTwoPage: false,

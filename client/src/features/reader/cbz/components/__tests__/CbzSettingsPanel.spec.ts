@@ -46,6 +46,7 @@ describe('CbzSettingsPanel', () => {
 
     expect(wrapper.text()).toContain('Fit mode')
     expect(wrapper.text()).toContain('Page view')
+    expect(wrapper.text()).toContain('Page turn')
     expect(wrapper.text()).toContain('Scroll mode')
     expect(wrapper.text()).toContain('Reading direction')
     expect(wrapper.text()).toContain('Background')
@@ -68,6 +69,15 @@ describe('CbzSettingsPanel', () => {
     await buttonByText(wrapper, 'Two-page')?.trigger('click')
 
     expect(wrapper.emitted('update')?.[0]).toEqual([{ viewMode: 'two-page' }])
+  })
+
+  it('switches between cover and slide page turns', async () => {
+    const wrapper = mountPanel()
+
+    expect(buttonByText(wrapper, 'Cover')?.attributes('aria-pressed')).toBe('true')
+    await buttonByText(wrapper, 'Slide')?.trigger('click')
+
+    expect(wrapper.emitted('update')?.[0]).toEqual([{ pageTurnMode: 'slide' }])
   })
 
   it('switches scroll mode and reading direction', async () => {

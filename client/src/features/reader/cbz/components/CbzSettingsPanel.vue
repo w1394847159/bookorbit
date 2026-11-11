@@ -59,6 +59,11 @@ const viewOptions = computed(() => [
   { value: 'two-page', label: t('reader.cbz.view.twoPage'), icon: LayoutGrid },
 ])
 
+const pageTurnOptions = computed(() => [
+  { value: 'cover', label: t('reader.cbz.pageTurn.cover'), icon: BookOpen },
+  { value: 'slide', label: t('reader.cbz.pageTurn.slide'), icon: ArrowLeftRight },
+])
+
 const scrollOptions = computed(() => [
   { value: 'paginated', label: t('reader.cbz.scroll.paged'), icon: ScanLine },
   { value: 'infinite', label: t('reader.cbz.scroll.infinite'), icon: Layers },
@@ -98,6 +103,10 @@ function selectFit(value: FitMode) {
 
 function setViewMode(value: string) {
   emit('update', { viewMode: value as CbxReaderSettings['viewMode'] })
+}
+
+function setPageTurnMode(value: string) {
+  emit('update', { pageTurnMode: value as CbxReaderSettings['pageTurnMode'] })
 }
 
 function setScrollMode(value: string) {
@@ -187,6 +196,17 @@ const groupLabelClass = 'mb-2 block text-[11px] font-semibold uppercase tracking
           @update:model-value="setViewMode"
         />
         <p v-if="showPagedOnlyHint" class="mt-2 text-xs leading-snug text-muted-foreground">{{ t('reader.cbz.twoPagePagedOnly') }}</p>
+      </div>
+
+      <div v-if="settings.scrollMode === 'paginated'" class="border-b border-border px-4 py-3.5">
+        <p :class="groupLabelClass">{{ t('reader.cbz.pageTurn.label') }}</p>
+        <ReaderSegmentedControl
+          :options="pageTurnOptions"
+          :model-value="settings.pageTurnMode"
+          :aria-label="t('reader.cbz.pageTurn.label')"
+          @update:model-value="setPageTurnMode"
+        />
+        <p class="mt-2 text-xs leading-snug text-muted-foreground">{{ t('reader.cbz.pageTurn.hint') }}</p>
       </div>
 
       <div v-if="isTwoPagePreferred" class="border-b border-border px-4 py-3.5">

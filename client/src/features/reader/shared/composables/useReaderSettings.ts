@@ -160,6 +160,9 @@ function sanitizeCbxPartialSettings(settings: unknown): Partial<CbxReaderSetting
   if (settings.direction === 'ltr' || settings.direction === 'rtl') {
     out.direction = settings.direction
   }
+  if (settings.pageTurnMode === 'cover' || settings.pageTurnMode === 'slide') {
+    out.pageTurnMode = settings.pageTurnMode
+  }
   if (settings.spreadAlignment === 'normal' || settings.spreadAlignment === 'shifted') {
     out.spreadAlignment = settings.spreadAlignment
   }

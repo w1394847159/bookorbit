@@ -11634,6 +11634,12 @@
       "autoAdvanceHint": "翻過最後一頁時會自動開啟系列中的下一本。",
       "autoAdvancePagedOnly": "自動續讀僅在分頁模式下生效。",
       "pageView": "頁面檢視",
+      "pageTurn": {
+        "label": "翻頁效果",
+        "cover": "覆蓋",
+        "slide": "平移",
+        "hint": "覆蓋翻頁會帶書頁邊緣立體陰影，平移翻頁像膠卷一樣連動。"
+      },
       "twoPagePagedOnly": "雙頁僅可在分頁模式下展示。",
       "spreadSection": "跨頁雙欄",
       "spreadFallbackHint": "當前螢幕寬度不足，無法開啟雙頁，已切換為單頁展示。",

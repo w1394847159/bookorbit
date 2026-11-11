@@ -69,6 +69,9 @@ const CBX_SETTINGS_SCHEMA = z
     viewMode: z.enum(['single', 'two-page']),
     scrollMode: z.enum(['paginated', 'infinite', 'long-strip']),
     direction: z.enum(['ltr', 'rtl']),
+    // Optional for the same reason as autoAdvance: a field default in a partial parse would pin
+    // every book the reader touches instead of falling back to the user's cbx default.
+    pageTurnMode: z.enum(['cover', 'slide']).optional(),
     spreadAlignment: z.enum(['normal', 'shifted']),
     spreadGap: z.number().int().min(CBX_SPREAD_GAP_MIN).max(CBX_SPREAD_GAP_MAX).default(CBX_SPREAD_GAP_MIN),
     forceTwoPage: z.boolean(),

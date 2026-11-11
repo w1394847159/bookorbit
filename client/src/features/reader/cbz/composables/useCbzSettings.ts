@@ -4,6 +4,7 @@ export type FitMode = 'fit-page' | 'fit-width' | 'fit-height' | 'actual'
 export type ViewMode = 'single' | 'two-page'
 export type ScrollMode = 'paginated' | 'infinite' | 'long-strip'
 export type Direction = 'ltr' | 'rtl'
+export type PageTurnMode = 'cover' | 'slide'
 export type SpreadAlignment = 'normal' | 'shifted'
 export type WidePageSingletonMode = 'auto' | 'disable'
 export type BgColor = 'black' | 'gray' | 'white'
@@ -19,6 +20,7 @@ export function useCbzSettings() {
   const viewMode = ref<ViewMode>('single')
   const scrollMode = ref<ScrollMode>('paginated')
   const direction = ref<Direction>('ltr')
+  const pageTurnMode = ref<PageTurnMode>('cover')
   const spreadAlignment = ref<SpreadAlignment>('normal')
   const spreadGap = ref(0)
   const forceTwoPage = ref(false)
@@ -48,6 +50,7 @@ export function useCbzSettings() {
     viewMode,
     scrollMode,
     direction,
+    pageTurnMode,
     spreadAlignment,
     spreadGap,
     forceTwoPage,

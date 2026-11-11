@@ -12,6 +12,9 @@ const mocks = vi.hoisted(() => ({
   savedMode: 'infinite' as 'paginated' | 'infinite' | 'long-strip',
   savedViewMode: 'single' as 'single' | 'two-page',
   savedSpreadGap: 0,
+  savedPageTurnMode: 'cover' as 'cover' | 'slide',
+  savedDirection: 'ltr' as 'ltr' | 'rtl',
+  savedFitMode: 'fit-page' as 'fit-page' | 'fit-width' | 'fit-height' | 'actual',
   pageCount: 10_000,
   savedPageNumber: 9_000,
   savedAutoAdvance: false,
@@ -83,10 +86,11 @@ vi.mock('../shared/composables/useSeriesNextBook', () => ({
 
 vi.mock('./composables/useCbzSettings', () => ({
   useCbzSettings: () => ({
-    fitMode: ref('fit-page'),
+    fitMode: ref(mocks.savedFitMode),
     viewMode: ref('single'),
     scrollMode: ref('paginated'),
     direction: ref('ltr'),
+    pageTurnMode: ref('cover'),
     spreadAlignment: ref('normal'),
     spreadGap: ref(0),
     forceTwoPage: ref(false),
@@ -101,10 +105,11 @@ vi.mock('./composables/useCbzSettings', () => ({
 vi.mock('../shared/composables/useReaderSettings', () => ({
   useReaderSettings: () => ({
     effective: computed(() => ({
-      fitMode: 'fit-page',
+      fitMode: mocks.savedFitMode,
       viewMode: mocks.savedViewMode,
       scrollMode: mocks.savedMode,
-      direction: 'ltr',
+      direction: mocks.savedDirection,
+      pageTurnMode: mocks.savedPageTurnMode,
       spreadAlignment: 'normal',
       spreadGap: mocks.savedSpreadGap,
       forceTwoPage: false,
@@ -157,6 +162,9 @@ describe('CbzReaderView', () => {
     mocks.savedMode = 'infinite'
     mocks.savedViewMode = 'single'
     mocks.savedSpreadGap = 0
+    mocks.savedPageTurnMode = 'cover'
+    mocks.savedDirection = 'ltr'
+    mocks.savedFitMode = 'fit-page'
     mocks.pageCount = 10_000
     mocks.savedPageNumber = 9_000
     mocks.savedAutoAdvance = false
@@ -177,12 +185,13 @@ describe('CbzReaderView', () => {
     const wrapper = shallowMount(CbzReaderView, { props: { bookId: 11, fileId: 22, source: 'djvu' } })
     await flushPromises()
     expect(wrapper.find('[aria-label="reader.djvu.pageText"]').exists()).toBe(true)
-    await wrapper.get('img').trigger('error')
+    const currentLayer = wrapper.get('[data-pager-layer="current"]')
+    await currentLayer.get('img').trigger('error')
     expect(wrapper.text()).toContain('reader.pageImages.pageFailed')
     const retry = wrapper.findAll('button').find((button) => button.text() === 'common.retry')!
     await retry.trigger('click')
     expect(wrapper.text()).not.toContain('reader.pageImages.pageFailed')
-    expect(wrapper.get('img').attributes('alt')).toBe('reader.pageImages.pageAlt')
+    expect(wrapper.get('[data-pager-layer="current"]').get('img').attributes('alt')).toBe('reader.pageImages.pageAlt')
     wrapper.unmount()
   })
 
@@ -226,7 +235,7 @@ describe('CbzReaderView', () => {
     expect(wrapper.get('[data-spread-side="right"]').classes()).toContain('justify-start')
     expect(wrapper.get('[data-spread-side="left"]').classes()).toContain('items-center-safe')
     expect(wrapper.get('[data-spread-side="right"]').classes()).toContain('items-center-safe')
-    expect(wrapper.findAll('[data-spread-side] img')).toHaveLength(2)
+    expect(wrapper.get('[data-pager-layer="current"]').findAll('[data-spread-side] img')).toHaveLength(2)
 
     wrapper.unmount()
   })
@@ -476,6 +485,332 @@ describe('CbzReaderView', () => {
     await nextTick()
 
     expect(wrapper.findComponent(NextIssueCard).exists()).toBe(true)
+
+    wrapper.unmount()
+  })
+
+  function dispatchPointer(target: EventTarget, type: string, clientX: number) {
+    target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY: 400, button: 0 }))
+  }
+
+  function sizeViewport(viewport: HTMLElement) {
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 400 },
+      clientHeight: { configurable: true, value: 800 },
+    })
+  }
+
+  it('turns to the next page while the current layer follows the finger 1:1', async () => {
+    mocks.savedMode = 'paginated'
+    mocks.pageCount = 6
+    mocks.savedPageNumber = 2
+
+    const wrapper = shallowMount(CbzReaderView, { props: { bookId: 11, fileId: 22 } })
+    await flushPromises()
+    await nextTick()
+
+    const viewport = wrapper.get('[data-testid="cbz-paginated-viewport"]').element as HTMLElement
+    sizeViewport(viewport)
+
+    dispatchPointer(viewport, 'pointerdown', 350)
+    dispatchPointer(window, 'pointermove', 150)
+
+    const currentLayer = wrapper.get('[data-pager-layer="current"]').element as HTMLElement
+    const nextLayer = wrapper.get('[data-pager-layer="next"]').element as HTMLElement
+    expect(currentLayer.style.transform).toBe('translate3d(-200px, 0, 0)')
+    expect(nextLayer.style.visibility).toBe('visible')
+    expect(Number((currentLayer.querySelector('[data-pager-shadow]') as HTMLElement).style.opacity)).toBeGreaterThan(0)
+
+    dispatchPointer(window, 'pointerup', 150)
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.get('[data-pager-layer="current"] [data-page]').attributes('data-page')).toBe('2')
+    expect(currentLayer.style.transform).toBe('translate3d(0px, 0, 0)')
+
+    wrapper.unmount()
+  })
+
+  it('snaps back when a slow drag stays below the turn threshold', async () => {
+    mocks.savedMode = 'paginated'
+    mocks.pageCount = 6
+    mocks.savedPageNumber = 2
+
+    const wrapper = shallowMount(CbzReaderView, { props: { bookId: 11, fileId: 22 } })
+    await flushPromises()
+    await nextTick()
+
+    const viewport = wrapper.get('[data-testid="cbz-paginated-viewport"]').element as HTMLElement
+    sizeViewport(viewport)
+
+    let now = 0
+    const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => now)
+    dispatchPointer(viewport, 'pointerdown', 350)
+    now = 200
+    dispatchPointer(window, 'pointermove', 320)
+    now = 400
+    dispatchPointer(window, 'pointerup', 320)
+    nowSpy.mockRestore()
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.get('[data-pager-layer="current"] [data-page]').attributes('data-page')).toBe('1')
+    expect((wrapper.get('[data-pager-layer="current"]').element as HTMLElement).style.transform).toBe('translate3d(0px, 0, 0)')
+
+    wrapper.unmount()
+  })
+
+  it('slides both layers together when the slide page turn mode is selected', async () => {
+    mocks.savedMode = 'paginated'
+    mocks.savedPageTurnMode = 'slide'
+    mocks.pageCount = 6
+    mocks.savedPageNumber = 2
+
+    const wrapper = shallowMount(CbzReaderView, { props: { bookId: 11, fileId: 22 } })
+    await flushPromises()
+    await nextTick()
+
+    const viewport = wrapper.get('[data-testid="cbz-paginated-viewport"]').element as HTMLElement
+    sizeViewport(viewport)
+
+    dispatchPointer(viewport, 'pointerdown', 350)
+    dispatchPointer(window, 'pointermove', 250)
+
+    const currentLayer = wrapper.get('[data-pager-layer="current"]').element as HTMLElement
+    const nextLayer = wrapper.get('[data-pager-layer="next"]').element as HTMLElement
+    expect(currentLayer.style.transform).toBe('translate3d(-100px, 0, 0)')
+    expect(nextLayer.style.transform).toBe('translate3d(300px, 0, 0)')
+
+    dispatchPointer(window, 'pointerup', 250)
+    await flushPromises()
+    wrapper.unmount()
+  })
+
+  it('hands the gesture back to native panning while zoomed in', async () => {
+    mocks.savedMode = 'paginated'
+    mocks.pageCount = 6
+    mocks.savedPageNumber = 2
+
+    const wrapper = shallowMount(CbzReaderView, { props: { bookId: 11, fileId: 22 } })
+    await flushPromises()
+    await nextTick()
+
+    const viewport = wrapper.get('[data-testid="cbz-paginated-viewport"]').element as HTMLElement
+    sizeViewport(viewport)
+    vi.spyOn(viewport, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 400, height: 800 } as DOMRect)
+
+    viewport.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, clientX: 200, clientY: 400, deltaY: -100 }))
+    await nextTick()
+
+    dispatchPointer(viewport, 'pointerdown', 350)
+    dispatchPointer(window, 'pointermove', 50)
+    dispatchPointer(window, 'pointerup', 50)
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.get('[data-pager-layer="current"] [data-page]').attributes('data-page')).toBe('1')
+
+    wrapper.unmount()
+  })
+
+  it('predecodes the pages around the current spread before they are shown', async () => {
+    mocks.savedMode = 'paginated'
+    mocks.pageCount = 6
+    mocks.savedPageNumber = 2
+
+    const OriginalImage = globalThis.Image
+    const decodedSources: string[] = []
+    class DecodedImage {
+      decoding = ''
+      draggable = false
+      naturalWidth = 800
+      naturalHeight = 1200
+      src = ''
+
+      decode() {
+        decodedSources.push(this.src)
+        return Promise.resolve()
+      }
+    }
+    vi.stubGlobal('Image', DecodedImage)
+
+    try {
+      const wrapper = shallowMount(CbzReaderView, { props: { bookId: 11, fileId: 22 } })
+      await flushPromises()
+      await nextTick()
+
+      expect(decodedSources).toEqual(
+        expect.arrayContaining([
+          '/api/v1/cbz/files/22/pages/0',
+          '/api/v1/cbz/files/22/pages/1',
+          '/api/v1/cbz/files/22/pages/2',
+          '/api/v1/cbz/files/22/pages/3',
+        ]),
+      )
+
+      wrapper.unmount()
+    } finally {
+      vi.stubGlobal('Image', OriginalImage)
+    }
+  })
+
+  it('turns back when the finger drags to the right', async () => {
+    mocks.savedMode = 'paginated'
+    mocks.pageCount = 6
+    mocks.savedPageNumber = 2
+
+    const wrapper = shallowMount(CbzReaderView, { props: { bookId: 11, fileId: 22 } })
+    await flushPromises()
+    await nextTick()
+
+    const viewport = wrapper.get('[data-testid="cbz-paginated-viewport"]').element as HTMLElement
+    sizeViewport(viewport)
+
+    dispatchPointer(viewport, 'pointerdown', 50)
+    dispatchPointer(window, 'pointermove', 250)
+    dispatchPointer(window, 'pointerup', 250)
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.get('[data-pager-layer="current"] [data-page]').attributes('data-page')).toBe('0')
+
+    wrapper.unmount()
+  })
+
+  it('maps a rightward drag to the next page in right-to-left reading', async () => {
+    mocks.savedMode = 'paginated'
+    mocks.savedDirection = 'rtl'
+    mocks.pageCount = 6
+    mocks.savedPageNumber = 2
+
+    const wrapper = shallowMount(CbzReaderView, { props: { bookId: 11, fileId: 22 } })
+    await flushPromises()
+    await nextTick()
+
+    const viewport = wrapper.get('[data-testid="cbz-paginated-viewport"]').element as HTMLElement
+    sizeViewport(viewport)
+
+    dispatchPointer(viewport, 'pointerdown', 150)
+    dispatchPointer(window, 'pointermove', 350)
+    dispatchPointer(window, 'pointerup', 350)
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.get('[data-pager-layer="current"] [data-page]').attributes('data-page')).toBe('2')
+
+    wrapper.unmount()
+  })
+
+  it('keeps continuous mode page buttons scrolling the strip', async () => {
+    mocks.savedMode = 'infinite'
+    mocks.pageCount = 6
+    mocks.savedPageNumber = 2
+
+    const wrapper = shallowMount(CbzReaderView, { props: { bookId: 11, fileId: 22 } })
+    await flushPromises()
+    await nextTick()
+    mocks.scrollToIndex.mockClear()
+
+    await wrapper.get('button[aria-label="reader.pageImages.nextPage"]').trigger('click')
+    await flushPromises()
+    await nextTick()
+
+    expect(mocks.scrollToIndex).toHaveBeenCalledWith(2, { align: 'start' })
+    expect(wrapper.get('input[type="range"]').attributes('value')).toBe('2')
+
+    wrapper.unmount()
+  })
+
+  it('allows native scrolling when a paginated page is wider than the viewport', async () => {
+    mocks.savedMode = 'paginated'
+    mocks.savedFitMode = 'fit-width'
+    mocks.pageCount = 6
+    mocks.savedPageNumber = 2
+
+    const wrapper = shallowMount(CbzReaderView, { props: { bookId: 11, fileId: 22 } })
+    await flushPromises()
+    await nextTick()
+
+    const viewport = wrapper.get('[data-testid="cbz-paginated-viewport"]')
+    expect(viewport.classes()).toContain('overflow-auto')
+
+    wrapper.unmount()
+  })
+
+  it('keeps the incoming page opaque after it was already decoded in the next layer', async () => {
+    mocks.savedMode = 'paginated'
+    mocks.pageCount = 6
+    mocks.savedPageNumber = 2
+
+    const wrapper = shallowMount(CbzReaderView, { props: { bookId: 11, fileId: 22 } })
+    await flushPromises()
+    await nextTick()
+
+    const viewport = wrapper.get('[data-testid="cbz-paginated-viewport"]').element as HTMLElement
+    sizeViewport(viewport)
+    await wrapper.get('[data-pager-layer="next"]').get('img').trigger('load')
+
+    dispatchPointer(viewport, 'pointerdown', 350)
+    dispatchPointer(window, 'pointermove', 150)
+    dispatchPointer(window, 'pointerup', 150)
+    await flushPromises()
+    await nextTick()
+
+    const currentImage = wrapper.get('[data-pager-layer="current"]').get('img')
+    expect(currentImage.attributes('data-page')).toBe('2')
+    expect(currentImage.classes()).not.toContain('opacity-0')
+
+    wrapper.unmount()
+  })
+
+  it('opens the next book when a gesture turns past the last page with auto-advance armed', async () => {
+    mocks.savedMode = 'paginated'
+    mocks.pageCount = 3
+    mocks.savedPageNumber = 3
+    mocks.savedAutoAdvance = true
+    mocks.nextBook = NEXT_BOOK
+
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000)
+    const wrapper = shallowMount(CbzReaderView, { props: { bookId: 11, fileId: 22 } })
+    await flushPromises()
+    await nextTick()
+
+    const viewport = wrapper.get('[data-testid="cbz-paginated-viewport"]').element as HTMLElement
+    sizeViewport(viewport)
+    now.mockReturnValue(11_000)
+    dispatchPointer(viewport, 'pointerdown', 350)
+    dispatchPointer(window, 'pointermove', 100)
+    dispatchPointer(window, 'pointerup', 100)
+    await flushPromises()
+
+    expect(mocks.routerPush).toHaveBeenCalledWith({ name: 'reader', params: { bookId: 91, fileId: 501 }, query: { format: 'cbz' } })
+
+    now.mockRestore()
+    wrapper.unmount()
+  })
+
+  it('clears a preview load failure once the real image loads', async () => {
+    mocks.savedMode = 'paginated'
+    mocks.pageCount = 6
+    mocks.savedPageNumber = 2
+
+    const wrapper = shallowMount(CbzReaderView, { props: { bookId: 11, fileId: 22 } })
+    await flushPromises()
+    await nextTick()
+
+    const viewport = wrapper.get('[data-testid="cbz-paginated-viewport"]').element as HTMLElement
+    sizeViewport(viewport)
+    const nextImage = wrapper.get('[data-pager-layer="next"]').get('img')
+    await nextImage.trigger('error')
+    await nextImage.trigger('load')
+
+    dispatchPointer(viewport, 'pointerdown', 350)
+    dispatchPointer(window, 'pointermove', 150)
+    dispatchPointer(window, 'pointerup', 150)
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.text()).not.toContain('reader.pageImages.pageFailed')
 
     wrapper.unmount()
   })

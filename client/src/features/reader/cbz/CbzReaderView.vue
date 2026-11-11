@@ -28,7 +28,9 @@ import { useCbzSettings } from './composables/useCbzSettings'
 import { useReaderSettings } from '../shared/composables/useReaderSettings'
 import { useFullscreen } from '../shared/composables/useFullscreen'
 import type { CbxReaderSettings } from '@bookorbit/types'
-import { DEFAULT_WIDE_PAGE_RATIO_THRESHOLD, createCbzSpreadLayout } from './lib/spread-layout'
+import { DEFAULT_WIDE_PAGE_RATIO_THRESHOLD, createCbzSpreadLayout, type CbzSpread } from './lib/spread-layout'
+import { CbzPageTurnController, type CbzPageTurnDirection, type CbzPagerLayerName } from './lib/page-turn-controller'
+import { VirtualSlidePool } from './lib/virtual-slide-pool'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import ReaderSettingsSheet from '@/features/reader/shared/components/ReaderSettingsSheet.vue'
@@ -69,6 +71,7 @@ const {
   viewMode,
   scrollMode,
   direction,
+  pageTurnMode,
   spreadAlignment,
   spreadGap,
   forceTwoPage,
@@ -83,6 +86,8 @@ const bookSettings = useReaderSettings(props.fileId, props.source === 'djvu' ? '
 
 const currentPage = ref(0)
 const imageError = ref(false)
+const failedPages = ref<Set<number>>(new Set())
+const loadedPages = ref<Set<number>>(new Set())
 const imageGeneration = ref(0)
 const showPageText = ref(false)
 function goBack() {
@@ -111,14 +116,12 @@ async function retryImages() {
   if (disposed || error.value || pageCount.value <= 0) return
   currentPage.value = Math.min(currentPage.value, pageCount.value - 1)
   imageError.value = false
+  failedPages.value = new Set()
+  loadedPages.value = new Set()
   currentImageLoaded.value = false
   loadedImageCount.value = 0
   imageGeneration.value++
-  preloadCache.clear()
-}
-function onPaginatedLoad(event: Event) {
-  const image = event.target
-  if (image instanceof HTMLImageElement) onPaginatedImageLoad(Number(image.dataset.page), event)
+  createPredecodePool()
 }
 const showSettings = ref(false)
 const scrollContainer = ref<HTMLElement | null>(null)
@@ -157,6 +160,7 @@ const panelSettings = computed<CbxReaderSettings>(() => ({
   viewMode: viewMode.value,
   scrollMode: scrollMode.value,
   direction: direction.value,
+  pageTurnMode: pageTurnMode.value,
   spreadAlignment: spreadAlignment.value,
   spreadGap: spreadGap.value,
   forceTwoPage: forceTwoPage.value,
@@ -172,6 +176,7 @@ function applyPanelUpdate(partial: Partial<CbxReaderSettings>) {
   if (partial.viewMode !== undefined) viewMode.value = partial.viewMode
   if (partial.scrollMode !== undefined) scrollMode.value = partial.scrollMode
   if (partial.direction !== undefined) direction.value = partial.direction
+  if (partial.pageTurnMode !== undefined) pageTurnMode.value = partial.pageTurnMode
   if (partial.spreadAlignment !== undefined) spreadAlignment.value = partial.spreadAlignment
   if (partial.spreadGap !== undefined) spreadGap.value = partial.spreadGap
   if (partial.forceTwoPage !== undefined) forceTwoPage.value = partial.forceTwoPage
@@ -195,6 +200,7 @@ function applySettings(s: CbxReaderSettings) {
   viewMode.value = s.viewMode
   scrollMode.value = s.scrollMode
   direction.value = s.direction
+  pageTurnMode.value = s.pageTurnMode
   spreadAlignment.value = s.spreadAlignment
   spreadGap.value = s.spreadGap
   forceTwoPage.value = s.forceTwoPage
@@ -228,10 +234,45 @@ const spreadLayout = computed(() =>
 
 const currentSpread = computed(() => spreadLayout.value.spreadForPage(currentPage.value))
 
-const renderSpread = computed(() => currentSpread.value?.kind === 'spread')
-const renderSinglePage = computed(() => (currentSpread.value?.kind === 'single' ? currentSpread.value.singlePage : null))
-const renderLeftPage = computed(() => (currentSpread.value?.kind === 'spread' ? currentSpread.value.leftPage : null))
-const renderRightPage = computed(() => (currentSpread.value?.kind === 'spread' ? currentSpread.value.rightPage : null))
+interface PagerSpreadSnapshot {
+  prev: CbzSpread | null
+  current: CbzSpread | null
+  next: CbzSpread | null
+}
+
+// The pager freezes the three spreads while a finger or animation is in flight. Swapping layer
+// contents mid-turn would flash the next page into the outgoing layer, so the snapshot only lifts
+// after the committed anchor has rendered.
+const livePagerSnapshot = computed<PagerSpreadSnapshot>(() => {
+  const layout = spreadLayout.value
+  const spreadIndex = layout.spreadIndexForPage(currentPage.value)
+  return {
+    prev: layout.spreads[spreadIndex - 1] ?? null,
+    current: layout.spreads[spreadIndex] ?? null,
+    next: layout.spreads[spreadIndex + 1] ?? null,
+  }
+})
+const frozenPagerSnapshot = ref<PagerSpreadSnapshot | null>(null)
+const frozenNavigation = ref<{ next: number; prev: number } | null>(null)
+const pagerSnapshot = computed(() => frozenPagerSnapshot.value ?? livePagerSnapshot.value)
+const pagerLayers = computed<Array<{ name: CbzPagerLayerName; spread: CbzSpread | null }>>(() => [
+  { name: 'prev', spread: pagerSnapshot.value.prev },
+  { name: 'current', spread: pagerSnapshot.value.current },
+  { name: 'next', spread: pagerSnapshot.value.next },
+])
+
+const pagerLayerElements: Record<CbzPagerLayerName, HTMLElement | null> = { prev: null, current: null, next: null }
+
+function setPagerLayerRef(name: CbzPagerLayerName, element: unknown) {
+  pagerLayerElements[name] = element instanceof HTMLElement ? element : null
+}
+
+const pagerLayerSetters: Record<CbzPagerLayerName, (element: unknown) => void> = {
+  prev: (element) => setPagerLayerRef('prev', element),
+  current: (element) => setPagerLayerRef('current', element),
+  next: (element) => setPagerLayerRef('next', element),
+}
+
 const spreadContainerStyle = computed(() => ({ columnGap: `${spreadGap.value}px` }))
 const renderKey = computed(() => {
   const spread = currentSpread.value
@@ -251,6 +292,14 @@ const pageLabel = computed(() => {
   }
   return `${start + 1} / ${pageCount.value}`
 })
+
+function pageSrc(pageIndex: number | null): string {
+  return pageIndex === null ? '' : pageUrl(pageIndex)
+}
+
+function pageAlt(pageIndex: number | null): string {
+  return pageIndex === null ? '' : t('reader.pageImages.pageAlt', { page: pageIndex + 1 })
+}
 
 const fullscreenLabel = computed(() => (isFullscreen.value ? 'Exit fullscreen' : 'Enter fullscreen'))
 const zoomPercent = computed(() => Math.round(zoomScale.value * 100))
@@ -383,17 +432,89 @@ const canGoNext = computed(() => {
   return currentPage.value < pageCount.value - 1
 })
 
+const nextPageAnchor = computed(() => {
+  if (pageCount.value <= 0) return currentPage.value
+  if (isTwoPageEffective.value) return spreadLayout.value.nextAnchor(currentPage.value)
+  return Math.min(pageCount.value - 1, currentPage.value + 1)
+})
+
+const prevPageAnchor = computed(() => {
+  if (pageCount.value <= 0) return currentPage.value
+  if (isTwoPageEffective.value) return spreadLayout.value.prevAnchor(currentPage.value)
+  return Math.max(0, currentPage.value - 1)
+})
+
+async function commitPageTurn(direction: CbzPageTurnDirection) {
+  if (disposed) return
+  const frozen = frozenNavigation.value
+  const target = frozen ? frozen[direction] : direction === 'next' ? nextPageAnchor.value : prevPageAnchor.value
+  if (target === currentPage.value) {
+    frozenPagerSnapshot.value = null
+    frozenNavigation.value = null
+    return
+  }
+  frozenPagerSnapshot.value = null
+  frozenNavigation.value = null
+  currentPage.value = target
+  await nextTick()
+}
+
+const pageTurnController = new CbzPageTurnController({
+  getViewport: () => paginatedViewport.value,
+  getLayers: () => pagerLayerElements,
+  getMode: () => pageTurnMode.value,
+  getDirection: () => direction.value,
+  canGoNext: () => canGoNext.value,
+  canGoPrev: () => canGoPrev.value,
+  onTurnStart: () => {
+    frozenPagerSnapshot.value = { ...livePagerSnapshot.value }
+    frozenNavigation.value = { next: nextPageAnchor.value, prev: prevPageAnchor.value }
+  },
+  onTurnAbort: () => {
+    frozenPagerSnapshot.value = null
+    frozenNavigation.value = null
+  },
+  onBoundaryNext: () => {
+    if (shouldAutoAdvance()) void openNextBook()
+  },
+  onCommit: commitPageTurn,
+})
+
+const paginatedScrollable = computed(() => zoomScale.value > 1 || fitMode.value === 'fit-width' || fitMode.value === 'actual')
+const paginatedTouchAction = computed(() => (zoomScale.value > 1 || fitMode.value === 'actual' ? 'pan-x pan-y' : 'pan-y'))
+
+watch(
+  [paginatedViewport, scrollMode, zoomScale],
+  ([viewport, mode, zoom]) => {
+    if (viewport && mode === 'paginated' && zoom <= 1) pageTurnController.attach(viewport)
+    else pageTurnController.detach()
+  },
+  { immediate: true, flush: 'post' },
+)
+
+watch(direction, () => pageTurnController.restart(), { flush: 'post' })
+watch([pageTurnMode, isTwoPageEffective], () => pageTurnController.cancel(), { flush: 'post' })
+
 watch(renderKey, () => {
-  imageError.value = false
   const spread = currentSpread.value
-  const expected = spread?.pages.length ?? 0
-  pendingImageLoads.value = expected
-  loadedImageCount.value = 0
-  currentImageLoaded.value = expected === 0
+  const pages = spread?.pages ?? []
+  imageError.value = pages.some((page) => failedPages.value.has(page))
+  pendingImageLoads.value = pages.length
+  loadedImageCount.value = pages.filter((page) => loadedPages.value.has(page)).length
+  currentImageLoaded.value = pages.length === 0 || loadedImageCount.value >= pendingImageLoads.value
 })
 
 // ── Preloading ─────────────────────────────────────────────────────────────────
-const preloadCache = new Map<number, HTMLImageElement>()
+let predecodePool: VirtualSlidePool | null = null
+
+function createPredecodePool() {
+  predecodePool?.dispose()
+  predecodePool = new VirtualSlidePool(pageCount.value, pageUrl, {
+    onDecoded: (pageIndex, image) => {
+      setPageRatio(pageIndex, image.naturalWidth, image.naturalHeight)
+    },
+  })
+}
 
 function setPageRatio(pageIndex: number, width: number, height: number) {
   if (pageIndex < 0 || pageIndex >= pageCount.value || height <= 0 || width <= 0) return
@@ -405,14 +526,6 @@ function setPageRatio(pageIndex: number, width: number, height: number) {
   const nextDimensions = [...pageDimensions.value]
   nextDimensions[pageIndex] = { width, height }
   pageDimensions.value = nextDimensions
-}
-
-function preload(n: number) {
-  if (n < 0 || n >= pageCount.value || preloadCache.has(n)) return
-  const img = new Image()
-  img.onload = () => setPageRatio(n, img.naturalWidth, img.naturalHeight)
-  img.src = pageUrl(n)
-  preloadCache.set(n, img)
 }
 
 // Every DjVu page is rendered on the server by a small shared decoder pool, so it looks one spread
@@ -430,22 +543,30 @@ function schedulePreload(anchorPage: number) {
     for (const page of spread.pages) pagesToPreload.add(page)
   }
 
-  for (const page of pagesToPreload) preload(page)
-
-  for (const [page] of preloadCache) {
-    if (Math.abs(page - anchorPage) > 12) preloadCache.delete(page)
-  }
+  predecodePool?.preloadPages(pagesToPreload)
+  predecodePool?.retain(pagesToPreload)
 }
 
-function onPaginatedImageLoad(pageIndex: number, e: Event) {
-  const target = e.target
+function onPaginatedLayerLoad(layerName: CbzPagerLayerName, pageIndex: number | null, event: Event) {
+  if (pageIndex === null) return
+  const target = event.target
   if (!(target instanceof HTMLImageElement)) return
   setPageRatio(pageIndex, target.naturalWidth, target.naturalHeight)
+  loadedPages.value.add(pageIndex)
+  failedPages.value.delete(pageIndex)
+  if (layerName !== 'current') return
 
-  loadedImageCount.value += 1
-  if (loadedImageCount.value >= pendingImageLoads.value) {
-    currentImageLoaded.value = true
-  }
+  const pages = currentSpread.value?.pages ?? []
+  loadedImageCount.value = pages.filter((page) => loadedPages.value.has(page)).length
+  if (pages.length === 0 || loadedImageCount.value >= pendingImageLoads.value) currentImageLoaded.value = true
+}
+
+function onPaginatedLayerError(layerName: CbzPagerLayerName, event: Event) {
+  const target = event.target
+  const rawPage = target instanceof HTMLImageElement ? (target.dataset.page ?? target.dataset.previewPage) : undefined
+  const pageIndex = rawPage === undefined ? null : Number(rawPage)
+  if (pageIndex !== null && Number.isInteger(pageIndex)) failedPages.value.add(pageIndex)
+  if (layerName === 'current') imageError.value = true
 }
 
 function onStripImageLoad(pageIndex: number, e: Event) {
@@ -490,74 +611,7 @@ async function openNextBook() {
 }
 
 // ── Navigation ─────────────────────────────────────────────────────────────────
-function triggerCbzSlide(target: number, isForward: boolean) {
-  const stage = paginatedViewport.value
-  if (!stage || (zoomScale.value && zoomScale.value > 1)) {
-    currentPage.value = target
-    return
-  }
-  const pagesEl = stage.querySelector('[data-testid="cbz-paginated-pages"]') as HTMLElement | null
-  if (!pagesEl) {
-    currentPage.value = target
-    return
-  }
-  const anyStage = stage as any
-  if (anyStage.__slideClone) {
-    try { anyStage.__slideClone.remove() } catch {}
-    anyStage.__slideClone = null
-  }
-  if (anyStage.__slideAnim) {
-    try { anyStage.__slideAnim.cancel() } catch {}
-    anyStage.__slideAnim = null
-  }
-  const clone = pagesEl.cloneNode(true) as HTMLElement
-  clone.setAttribute('data-slide-clone', 'true')
-  Object.assign(clone.style, {
-    position: 'absolute',
-    inset: '0',
-    margin: 'auto',
-    pointerEvents: 'none',
-    zIndex: '5',
-    willChange: 'transform',
-  })
-  if (pagesEl.parentElement) {
-    pagesEl.parentElement.style.overflow = 'hidden'
-    pagesEl.parentElement.style.position = 'relative'
-    pagesEl.parentElement.appendChild(clone)
-  }
-  anyStage.__slideClone = clone
-  const isRtl = direction.value === 'rtl'
-  const outX = isForward ? (isRtl ? '100%' : '-100%') : (isRtl ? '-100%' : '100%')
-  const inX = isForward ? (isRtl ? '-100%' : '100%') : (isRtl ? '100%' : '-100%')
-  const easing = 'cubic-bezier(0.25, 1, 0.5, 1)'
-  const duration = 240
-
-  currentPage.value = target
-
-  try {
-    clone.animate([
-      { transform: 'translate3d(0, 0, 0)' },
-      { transform: `translate3d(${outX}, 0, 0)` },
-    ], { duration, easing, fill: 'forwards' }).onfinish = () => {
-      try { clone.remove() } catch {}
-      if (anyStage.__slideClone === clone) anyStage.__slideClone = null
-    }
-  } catch {
-    clone.remove()
-  }
-
-  try {
-    anyStage.__slideAnim = pagesEl.animate([
-      { transform: `translate3d(${inX}, 0, 0)` },
-      { transform: 'translate3d(0, 0, 0)' },
-    ], { duration, easing, fill: 'forwards' })
-    anyStage.__slideAnim.onfinish = () => {
-      anyStage.__slideAnim = null
-    }
-  } catch {}
-}
-
-function goToPage(n: number, isForward?: boolean) {
+function goToPage(n: number) {
   if (pageCount.value <= 0) return
 
   const clamped = Math.max(0, Math.min(n, pageCount.value - 1))
@@ -569,33 +623,55 @@ function goToPage(n: number, isForward?: boolean) {
   }
   if (target === currentPage.value) return
 
-  triggerCbzSlide(target, isForward !== undefined ? isForward : target >= currentPage.value)
+  if (zoomScale.value > 1) {
+    pageTurnController.cancel()
+    frozenPagerSnapshot.value = null
+    frozenNavigation.value = null
+    currentPage.value = target
+    return
+  }
+
+  if (target === nextPageAnchor.value) {
+    pageTurnController.requestTurn('next')
+    return
+  }
+  if (target === prevPageAnchor.value) {
+    pageTurnController.requestTurn('prev')
+    return
+  }
+
+  pageTurnController.cancel()
+  frozenPagerSnapshot.value = null
+  frozenNavigation.value = null
+  currentPage.value = target
 }
 
 function nextPage() {
   if (pageCount.value <= 0) return
+  if (scrollMode.value !== 'paginated' || zoomScale.value > 1) {
+    goToPage(currentPage.value + 1)
+    return
+  }
   if (!canGoNext.value) {
     if (shouldAutoAdvance()) void openNextBook()
     return
   }
-  if (isTwoPageEffective.value) {
-    goToPage(spreadLayout.value.nextAnchor(currentPage.value), true)
-    return
-  }
-  goToPage(currentPage.value + 1, true)
+  pageTurnController.requestTurn('next')
 }
 
 function prevPage() {
-  if (pageCount.value <= 0) return
-  if (isTwoPageEffective.value) {
-    goToPage(spreadLayout.value.prevAnchor(currentPage.value), false)
+  if (scrollMode.value !== 'paginated' || zoomScale.value > 1) {
+    goToPage(currentPage.value - 1)
     return
   }
-  goToPage(currentPage.value - 1, false)
+  if (!canGoPrev.value) return
+  pageTurnController.requestTurn('prev')
 }
 
 // ── Click zones (left / middle / right) ───────────────────────────────────────
 function handleImageClick(e: MouseEvent) {
+  // A click follows the pointerup of a completed drag; the drag already decided the page.
+  if (pageTurnController.shouldSuppressClick()) return
   const x = e.clientX / window.innerWidth
   if (x < 0.25) {
     if (direction.value === 'rtl') nextPage()
@@ -608,27 +684,6 @@ function handleImageClick(e: MouseEvent) {
     return
   }
   handleMiddleTap()
-}
-
-// ── Touch / swipe ──────────────────────────────────────────────────────────────
-let touchStartX = 0
-
-function onTouchStart(e: TouchEvent) {
-  if (e.touches[0]) touchStartX = e.touches[0].clientX
-}
-
-function onTouchEnd(e: TouchEvent) {
-  const touch = e.changedTouches[0]
-  if (!touch) return
-  const dx = touch.clientX - touchStartX
-  if (Math.abs(dx) < 50) return
-  if (dx < 0) {
-    if (direction.value === 'rtl') prevPage()
-    else nextPage()
-    return
-  }
-  if (direction.value === 'rtl') nextPage()
-  else prevPage()
 }
 
 // ── Zoom / wheel navigation ────────────────────────────────────────────────────
@@ -886,6 +941,7 @@ async function initializeReader() {
 
     await load()
     if (disposed || error.value || pageCount.value <= 0) return
+    createPredecodePool()
     const saved = progress.pageNumber.value
     if (saved && saved > 1) {
       currentPage.value = Math.min(saved - 1, pageCount.value - 1)
@@ -927,8 +983,9 @@ onBeforeRouteLeave(async () => {
 // runs first and would otherwise miss a page turn still inside the save debounce.
 onBeforeUnmount(() => {
   disposed = true
-  for (const image of preloadCache.values()) image.onload = null
-  preloadCache.clear()
+  pageTurnController.detach()
+  predecodePool?.dispose()
+  predecodePool = null
   void flushPendingProgress()
 })
 
@@ -1088,15 +1145,15 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- ── Paginated view ──────────────────────────────────────────────────── -->
+    <!-- Paginated view -->
     <div
       v-if="scrollMode === 'paginated'"
       ref="paginatedViewport"
       data-testid="cbz-paginated-viewport"
-      class="absolute inset-0 overflow-auto"
+      class="absolute inset-0"
+      :class="paginatedScrollable ? 'overflow-auto' : 'overflow-hidden'"
+      :style="{ touchAction: paginatedTouchAction }"
       @click="handleImageClick"
-      @touchstart.passive="onTouchStart"
-      @touchend.passive="onTouchEnd"
       @wheel="onWheel"
     >
       <div v-if="!currentImageLoaded && !error" class="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
@@ -1104,55 +1161,95 @@ onUnmounted(() => {
       </div>
 
       <div class="flex min-h-full min-w-full items-center justify-center" :style="paginatedStageStyle">
-        <div
-          data-testid="cbz-paginated-pages"
-          class="flex shrink-0 items-center-safe justify-center-safe px-1 origin-center"
-          :style="[paginatedContentStyle, renderSpread ? spreadContainerStyle : undefined]"
-        >
-          <template v-if="renderSpread">
-            <div data-spread-side="left" class="flex h-full min-w-0 flex-1 items-center-safe justify-end">
-              <img
-                v-if="renderLeftPage !== null"
-                :src="pageUrl(renderLeftPage)"
-                :key="`${renderLeftPage}:${imageGeneration}`"
-                :data-page="renderLeftPage"
-                :class="[imgFitClass, 'pointer-events-none transition-opacity duration-150', currentImageLoaded ? 'opacity-100' : 'opacity-0']"
-                :style="{ maxWidth: '100%', maxHeight: '100%' }"
-                :alt="t('reader.pageImages.pageAlt', { page: renderLeftPage + 1 })"
-                draggable="false"
-                @load="onPaginatedLoad"
-                @error="onImageError"
-              />
-              <div v-else aria-hidden="true" class="h-[92%] w-[92%] rounded-sm border border-border/60 bg-background/30" />
-            </div>
-            <div data-spread-side="right" class="flex h-full min-w-0 flex-1 items-center-safe justify-start">
-              <img
-                v-if="renderRightPage !== null"
-                :src="pageUrl(renderRightPage)"
-                :key="`${renderRightPage}:${imageGeneration}`"
-                :data-page="renderRightPage"
-                :class="[imgFitClass, 'pointer-events-none transition-opacity duration-150', currentImageLoaded ? 'opacity-100' : 'opacity-0']"
-                :style="{ maxWidth: '100%', maxHeight: '100%' }"
-                :alt="t('reader.pageImages.pageAlt', { page: renderRightPage + 1 })"
-                draggable="false"
-                @load="onPaginatedLoad"
-                @error="onImageError"
-              />
-              <div v-else aria-hidden="true" class="h-[92%] w-[92%] rounded-sm border border-border/60 bg-background/30" />
-            </div>
-          </template>
+        <div class="relative h-full w-full">
+          <div
+            v-for="layer in pagerLayers"
+            :key="layer.name"
+            :ref="pagerLayerSetters[layer.name]"
+            :data-pager-layer="layer.name"
+            class="absolute inset-0 flex items-center justify-center will-change-transform"
+            :style="{ background: bgValue }"
+          >
+            <div
+              v-if="layer.spread"
+              :data-testid="layer.name === 'current' ? 'cbz-paginated-pages' : undefined"
+              class="flex shrink-0 items-center-safe justify-center-safe origin-center"
+              :class="pageTurnMode === 'slide' ? '' : 'px-1'"
+              :style="[paginatedContentStyle, layer.spread.kind === 'spread' ? spreadContainerStyle : undefined]"
+            >
+              <template v-if="layer.spread.kind === 'spread'">
+                <div data-spread-side="left" class="flex h-full min-w-0 flex-1 items-center-safe justify-end">
+                  <img
+                    v-if="layer.spread.leftPage !== null"
+                    :src="pageSrc(layer.spread.leftPage)"
+                    :key="`${layer.spread.leftPage}:${imageGeneration}`"
+                    :data-page="layer.name === 'current' ? layer.spread.leftPage : undefined"
+                    :data-preview-page="layer.name !== 'current' ? layer.spread.leftPage : undefined"
+                    :class="[
+                      imgFitClass,
+                      'pointer-events-none transition-opacity duration-150',
+                      layer.name === 'current' && !currentImageLoaded ? 'opacity-0' : 'opacity-100',
+                    ]"
+                    :alt="pageAlt(layer.spread.leftPage)"
+                    draggable="false"
+                    @load="onPaginatedLayerLoad(layer.name, layer.spread.leftPage, $event)"
+                    @error="onPaginatedLayerError(layer.name, $event)"
+                  />
+                  <div v-else aria-hidden="true" class="h-[92%] w-[92%] rounded-sm border border-border/60 bg-background/30" />
+                </div>
+                <div data-spread-side="right" class="flex h-full min-w-0 flex-1 items-center-safe justify-start">
+                  <img
+                    v-if="layer.spread.rightPage !== null"
+                    :src="pageSrc(layer.spread.rightPage)"
+                    :key="`${layer.spread.rightPage}:${imageGeneration}`"
+                    :data-page="layer.name === 'current' ? layer.spread.rightPage : undefined"
+                    :data-preview-page="layer.name !== 'current' ? layer.spread.rightPage : undefined"
+                    :class="[
+                      imgFitClass,
+                      'pointer-events-none transition-opacity duration-150',
+                      layer.name === 'current' && !currentImageLoaded ? 'opacity-0' : 'opacity-100',
+                    ]"
+                    :alt="pageAlt(layer.spread.rightPage)"
+                    draggable="false"
+                    @load="onPaginatedLayerLoad(layer.name, layer.spread.rightPage, $event)"
+                    @error="onPaginatedLayerError(layer.name, $event)"
+                  />
+                  <div v-else aria-hidden="true" class="h-[92%] w-[92%] rounded-sm border border-border/60 bg-background/30" />
+                </div>
+              </template>
 
-          <img
-            v-else-if="renderSinglePage !== null"
-            :src="pageUrl(renderSinglePage)"
-            :key="`${renderSinglePage}:${imageGeneration}`"
-            :data-page="renderSinglePage"
-            :class="[imgFitClass, 'pointer-events-none transition-opacity duration-150', currentImageLoaded ? 'opacity-100' : 'opacity-0']"
-            :alt="t('reader.pageImages.pageAlt', { page: renderSinglePage + 1 })"
-            draggable="false"
-            @load="onPaginatedLoad"
-            @error="onImageError"
-          />
+              <img
+                v-else-if="layer.spread.singlePage !== null"
+                :src="pageSrc(layer.spread.singlePage)"
+                :key="`${layer.spread.singlePage}:${imageGeneration}`"
+                :data-page="layer.name === 'current' ? layer.spread.singlePage : undefined"
+                :data-preview-page="layer.name !== 'current' ? layer.spread.singlePage : undefined"
+                :class="[
+                  imgFitClass,
+                  'pointer-events-none transition-opacity duration-150',
+                  layer.name === 'current' && !currentImageLoaded ? 'opacity-0' : 'opacity-100',
+                ]"
+                :alt="pageAlt(layer.spread.singlePage)"
+                draggable="false"
+                @load="onPaginatedLayerLoad(layer.name, layer.spread.singlePage, $event)"
+                @error="onPaginatedLayerError(layer.name, $event)"
+              />
+            </div>
+
+            <div
+              v-if="layer.spread"
+              data-pager-shadow
+              aria-hidden="true"
+              class="pointer-events-none absolute inset-y-0 w-8 opacity-0"
+              :class="direction === 'rtl' ? '-left-8' : '-right-8'"
+              :style="{
+                backgroundImage:
+                  direction === 'rtl'
+                    ? 'linear-gradient(to left, rgba(0, 0, 0, 0.42), rgba(0, 0, 0, 0))'
+                    : 'linear-gradient(to right, rgba(0, 0, 0, 0.42), rgba(0, 0, 0, 0))',
+              }"
+            />
+          </div>
         </div>
       </div>
     </div>

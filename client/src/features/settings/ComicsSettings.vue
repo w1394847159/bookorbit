@@ -187,6 +187,34 @@ onMounted(load)
           </div>
         </div>
 
+        <!-- Page turn animation -->
+        <div class="settings-row">
+          <div>
+            <p class="settings-label">
+              {{ t('reader.cbz.pageTurn.label') }}
+            </p>
+            <p class="settings-hint overflow-hidden text-ellipsis whitespace-nowrap md:overflow-visible md:whitespace-normal">
+              {{ t('reader.cbz.pageTurn.hint') }}
+            </p>
+          </div>
+          <div class="flex flex-wrap items-center gap-1.5 p-1 rounded-lg border border-border bg-muted/50 self-start">
+            <button
+              class="h-8 px-3 rounded-md text-xs font-medium transition-colors"
+              :class="effective.pageTurnMode === 'cover' ? 'bg-background shadow-xs text-foreground' : 'text-muted-foreground hover:text-foreground'"
+              @click="update({ pageTurnMode: 'cover' })"
+            >
+              {{ t('reader.cbz.pageTurn.cover') }}
+            </button>
+            <button
+              class="h-8 px-3 rounded-md text-xs font-medium transition-colors"
+              :class="effective.pageTurnMode === 'slide' ? 'bg-background shadow-xs text-foreground' : 'text-muted-foreground hover:text-foreground'"
+              @click="update({ pageTurnMode: 'slide' })"
+            >
+              {{ t('reader.cbz.pageTurn.slide') }}
+            </button>
+          </div>
+        </div>
+
         <!-- Spread alignment -->
         <div class="settings-row">
           <div>
