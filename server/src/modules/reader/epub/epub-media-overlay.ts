@@ -78,24 +78,40 @@ function zipDir(path: string): string {
   return path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : '';
 }
 
+const zipIndexCache = new WeakMap<unzipper.File[], Map<string, unzipper.File>>();
+
+function getZipIndex(files: unzipper.File[]): Map<string, unzipper.File> {
+  let index = zipIndexCache.get(files);
+  if (!index) {
+    index = new Map();
+    for (const file of files) {
+      const exact = cleanEpubZipPath(file.path);
+      const clean = normalizeEpubZipPath(file.path);
+      const cleanLower = clean.toLowerCase();
+      if (!index.has(exact)) index.set(exact, file);
+      if (!index.has(clean)) index.set(clean, file);
+      if (!index.has(cleanLower)) index.set(cleanLower, file);
+    }
+    zipIndexCache.set(files, index);
+  }
+  return index;
+}
+
 /**
  * An entry named exactly `path` wins. Decoded names are compared only after that: hrefs arrive
  * decoded, so an entry whose name holds a literal escape such as `%20` is found only that way, but
  * it must not answer for the entry its escape decodes to.
+ * Optimized with WeakMap hash-table index for O(1) lookups.
  */
 export function findEpubZipEntry(files: unzipper.File[], path: string): unzipper.File | undefined {
+  const index = getZipIndex(files);
   const exact = cleanEpubZipPath(path);
+  if (index.has(exact)) return index.get(exact);
   const clean = normalizeEpubZipPath(path);
+  if (index.has(clean)) return index.get(clean);
   const cleanLower = clean.toLowerCase();
-  let decodedMatch: unzipper.File | undefined;
-  let ciMatch: unzipper.File | undefined;
-  for (const file of files) {
-    if (cleanEpubZipPath(file.path) === exact) return file;
-    const fp = normalizeEpubZipPath(file.path);
-    if (!decodedMatch && fp === clean) decodedMatch = file;
-    if (!ciMatch && fp.toLowerCase() === cleanLower) ciMatch = file;
-  }
-  return decodedMatch ?? ciMatch;
+  if (index.has(cleanLower)) return index.get(cleanLower);
+  return undefined;
 }
 
 function parseClock(value: unknown): number | null {

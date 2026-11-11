@@ -490,7 +490,74 @@ async function openNextBook() {
 }
 
 // ── Navigation ─────────────────────────────────────────────────────────────────
-function goToPage(n: number) {
+function triggerCbzSlide(target: number, isForward: boolean) {
+  const stage = paginatedViewport.value
+  if (!stage || (zoomScale.value && zoomScale.value > 1)) {
+    currentPage.value = target
+    return
+  }
+  const pagesEl = stage.querySelector('[data-testid="cbz-paginated-pages"]') as HTMLElement | null
+  if (!pagesEl) {
+    currentPage.value = target
+    return
+  }
+  const anyStage = stage as any
+  if (anyStage.__slideClone) {
+    try { anyStage.__slideClone.remove() } catch {}
+    anyStage.__slideClone = null
+  }
+  if (anyStage.__slideAnim) {
+    try { anyStage.__slideAnim.cancel() } catch {}
+    anyStage.__slideAnim = null
+  }
+  const clone = pagesEl.cloneNode(true) as HTMLElement
+  clone.setAttribute('data-slide-clone', 'true')
+  Object.assign(clone.style, {
+    position: 'absolute',
+    inset: '0',
+    margin: 'auto',
+    pointerEvents: 'none',
+    zIndex: '5',
+    willChange: 'transform',
+  })
+  if (pagesEl.parentElement) {
+    pagesEl.parentElement.style.overflow = 'hidden'
+    pagesEl.parentElement.style.position = 'relative'
+    pagesEl.parentElement.appendChild(clone)
+  }
+  anyStage.__slideClone = clone
+  const isRtl = direction.value === 'rtl'
+  const outX = isForward ? (isRtl ? '100%' : '-100%') : (isRtl ? '-100%' : '100%')
+  const inX = isForward ? (isRtl ? '-100%' : '100%') : (isRtl ? '100%' : '-100%')
+  const easing = 'cubic-bezier(0.25, 1, 0.5, 1)'
+  const duration = 240
+
+  currentPage.value = target
+
+  try {
+    clone.animate([
+      { transform: 'translate3d(0, 0, 0)' },
+      { transform: `translate3d(${outX}, 0, 0)` },
+    ], { duration, easing, fill: 'forwards' }).onfinish = () => {
+      try { clone.remove() } catch {}
+      if (anyStage.__slideClone === clone) anyStage.__slideClone = null
+    }
+  } catch {
+    clone.remove()
+  }
+
+  try {
+    anyStage.__slideAnim = pagesEl.animate([
+      { transform: `translate3d(${inX}, 0, 0)` },
+      { transform: 'translate3d(0, 0, 0)' },
+    ], { duration, easing, fill: 'forwards' })
+    anyStage.__slideAnim.onfinish = () => {
+      anyStage.__slideAnim = null
+    }
+  } catch {}
+}
+
+function goToPage(n: number, isForward?: boolean) {
   if (pageCount.value <= 0) return
 
   const clamped = Math.max(0, Math.min(n, pageCount.value - 1))
@@ -502,7 +569,7 @@ function goToPage(n: number) {
   }
   if (target === currentPage.value) return
 
-  currentPage.value = target
+  triggerCbzSlide(target, isForward !== undefined ? isForward : target >= currentPage.value)
 }
 
 function nextPage() {
@@ -512,19 +579,19 @@ function nextPage() {
     return
   }
   if (isTwoPageEffective.value) {
-    goToPage(spreadLayout.value.nextAnchor(currentPage.value))
+    goToPage(spreadLayout.value.nextAnchor(currentPage.value), true)
     return
   }
-  goToPage(currentPage.value + 1)
+  goToPage(currentPage.value + 1, true)
 }
 
 function prevPage() {
   if (pageCount.value <= 0) return
   if (isTwoPageEffective.value) {
-    goToPage(spreadLayout.value.prevAnchor(currentPage.value))
+    goToPage(spreadLayout.value.prevAnchor(currentPage.value), false)
     return
   }
-  goToPage(currentPage.value - 1)
+  goToPage(currentPage.value - 1, false)
 }
 
 // ── Click zones (left / middle / right) ───────────────────────────────────────

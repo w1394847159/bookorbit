@@ -50,6 +50,8 @@ export function buildCspDirectives(options: CspOptions = {}) {
   const scriptSrc = ["'self'", "'wasm-unsafe-eval'", ...(allowCloudflareInsights ? [CLOUDFLARE_INSIGHTS_SCRIPT_SRC] : [])];
   const connectSrc = [
     "'self'",
+    'blob:',
+    'data:',
     'ws:',
     'wss:',
     'https://cdn.jsdelivr.net',
@@ -60,6 +62,7 @@ export function buildCspDirectives(options: CspOptions = {}) {
 
   return {
     defaultSrc: ["'self'"],
+    baseUri: ["'self'", 'blob:'],
     scriptSrc,
     styleSrc: ["'self'", "'unsafe-inline'", 'blob:', 'https://fonts.googleapis.com'],
     imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
